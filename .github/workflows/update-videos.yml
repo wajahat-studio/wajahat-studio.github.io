@@ -1,0 +1,87 @@
+name: Update latest videos
+
+on:
+  schedule:
+    - cron: "0 */3 * * *"
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/update-videos.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch latest videos from YouTube
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.request
+          import xml.etree.ElementTree as ET
+
+          CHANNELS = {
+              "UCdnXdHvapI2IwcEGeKYra4A": "MysticBites",
+              "UCXZBFnk6mXESIDxSRFZK9_A": "DuskBeat",
+              "UCJfAx_tuqhQ6bghgufljE_A": "Wajiverse",
+          }
+          NS = {"a": "http://www.w3.org/2005/Atom", "yt": "http://www.youtube.com/xml/schemas/2015"}
+          FEED = "https://www.youtube.com/feeds/videos.xml?"
+
+          def get(url):
+              req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+              return urllib.request.urlopen(req, timeout=30).read()
+
+          def parse(xml_bytes):
+              root = ET.fromstring(xml_bytes)
+              out = []
+              for e in root.findall("a:entry", NS)[:15]:
+                  link = e.find("a:link", NS)
+                  out.append({
+                      "id": e.find("yt:videoId", NS).text,
+                      "title": e.find("a:title", NS).text or "",
+                      "published": e.find("a:published", NS).text,
+                      "short": "/shorts/" in (link.get("href") if link is not None else ""),
+                  })
+              return out
+
+          old = {}
+          if os.path.exists("videos.json"):
+              try:
+                  old = json.load(open("videos.json", encoding="utf-8")).get("channels", {})
+              except Exception:
+                  old = {}
+
+          result = {}
+          for cid, name in CHANNELS.items():
+              base = cid[2:]
+              prev = old.get(cid, {}) if isinstance(old.get(cid), dict) else {}
+              try:
+                  videos = parse(get(FEED + "playlist_id=UULF" + base))
+                  shorts = parse(get(FEED + "playlist_id=UUSH" + base))
+                  print(name, len(videos), "videos,", len(shorts), "shorts")
+              except Exception as ex:
+                  print(name, "playlist feeds failed, using channel feed:", ex)
+                  try:
+                      allv = parse(get(FEED + "channel_id=" + cid))
+                      videos = [v for v in allv if not v["short"]]
+                      shorts = [v for v in allv if v["short"]]
+                      print(name, len(videos), "videos,", len(shorts), "shorts (fallback)")
+                  except Exception as ex2:
+                      print(name, "failed:", ex2)
+                      videos, shorts = prev.get("videos", []), prev.get("shorts", [])
+              result[cid] = {"videos": videos, "shorts": shorts}
+
+          with open("videos.json", "w", encoding="utf-8") as f:
+              json.dump({"channels": result}, f, ensure_ascii=False, indent=1)
+          PY
+
+      - name: Save changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add videos.json
+          git diff --cached --quiet || (git commit -m "Update videos" && git push)
